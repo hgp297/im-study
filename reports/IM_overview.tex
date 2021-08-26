@@ -1,0 +1,152 @@
+\documentclass{article}
+\usepackage{graphicx} 				%simple figure inclusion
+\usepackage{epstopdf, epsfig} 		%simple figure inclusion
+\usepackage{amsmath, amssymb, mathtools} %math
+\usepackage[utf8]{inputenc} 		%idk
+\usepackage[english]{babel} 		%idk
+\usepackage{microtype} 				%idk
+\usepackage[left=1.5in, right=1.5in]{geometry}
+\usepackage{fancyhdr} 				%header footer
+%\usepackage{mathptmx} 				%Times New Roman
+\usepackage[nottoc]{tocbibind} 		%place ToC and References
+\usepackage{float}					%place floats precisely
+\usepackage{tabulary}				%tables with good column size
+\usepackage[numbers]{natbib}		%bibliography with numbers, alpha order with APA
+\usepackage{hyperref}				%clickable references
+\usepackage{xfrac}   				%for \sfrac macro
+\usepackage[final]{pdfpages}		%add pdf pages
+\usepackage{bm}						%"more reliable" math boldface
+\usepackage{soul}					%smart underlining
+\usepackage{listings}				%include code
+
+\pagestyle{fancy}
+\cfoot{\thepage}
+
+\hypersetup{hidelinks}			%no box around links
+
+\linespread{1.3}
+
+\newcommand*{\Perm}[2]{{}^{#1}\!P_{#2}}%
+
+
+%New colors defined below
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+%Code listing style named "mystyle"
+\lstdefinestyle{mystyle}{
+  backgroundcolor=\color{backcolour},   commentstyle=\color{codegreen},
+  keywordstyle=\color{magenta},
+  numberstyle=\tiny\color{codegray},
+  stringstyle=\color{codepurple},
+  basicstyle=\footnotesize,
+  breakatwhitespace=false,         
+  breaklines=true,                 
+  captionpos=b,                    
+  keepspaces=true,                 
+  numbers=left,                    
+  numbersep=5pt,                  
+  showspaces=false,                
+  showstringspaces=false,
+  showtabs=false,                  
+  tabsize=2
+}
+
+%"mystyle" code listing set
+\lstset{style=mystyle}
+\lstset{basicstyle=\footnotesize\ttfamily,breaklines=true}
+\lstset{framextopmargin=50pt,frame=bottomline}
+
+\renewcommand\thesubsection{\Alph{subsection}}
+
+\DeclareMathOperator{\pr}{pr}
+
+%========================================================================
+
+\begin{document}
+
+\title{Summary of Intensity Measures for Collapse and Impact Prediction}
+\author{Huy G. Pham}
+
+\maketitle
+
+\section{Intensity Measures}
+
+To properly characterize the intensity measures along with the different isolated buildings, we are interested in not only intensity measures, but non-dimensionalized against building characteristics. We consider two sets of variables: the first to characterize isolated building parameters, and the second to characterize ground motion intensity.
+
+\subsection{Building parameters}
+To characterize the building parameters, the considered variables are:
+
+	\begin{enumerate}
+		\item Fixed-base structure period, $T_{fb}$. This represents the period of the structure above the isolation layer were it to be built conventionally without isolation. This allows a characterization of the superstructure and potentially impacts superstory drift.
+		\item Effective period of the isolation system, $T_M$. This represents the period of the entire isolation system. 
+	\end{enumerate}
+	
+To include these variables in a manner that is appropriately dimensionless, we propose the following measure. Starting from the ASCE 7-16 Eq. 17.5-1 (maximum displacement capacity for an isolated system),
+
+	$$D_M = \frac{g S_{M1} T_M}{4 \pi^2 B_M}$$
+
+We seek to use for $D_M$ our amplified moat gap, which is the exact equation above, amplified with a random scalar from 1.0 to 2.25. We can then back calculate an amplified $S_{M}$ that the structure was designed for. This follows from the simple conversion that $S_M = \frac{S_{1M}}{T_M}$.
+
+	$$S_{M, amp} = \frac{A_\delta D_M 4 \pi^2 B_M}{g T_M^2}$$
+	
+where $A_\delta D_M$ is the amplified moat gap in the design. We also seek to find the unamplified spectral pseudoacceleration at which the structure is designed for,
+
+	$$S_M = Sa(T_M)$$
+	
+which is the spectral acceleration at the effective period of the bearing, calculated from the $S_1$ value of the design spectrum that the designer chose.
+
+\subsection{Ground motion IMs}
+To characterize the ground motion, the considered IMs are:
+
+	\begin{enumerate}
+		\item Peak Ground Acceleration 
+			$$PGA = \max_t \left | \ddot{u}_g(t) \right |$$
+		\item Peak Ground Velocity 
+			$$PGV = \max_t \left | \dot{u}_g(t) \right |$$
+		\item Average spectral pseudoacceleration as defined in Eads (2015)
+			$$Sa_{avg}(T) = \left ( \prod_{i=1}^N Sa (c_i \cdot T) \right ) ^ {1/N}$$
+		where $N$ is the number of ordinates considered (spacing). A choice is $[0.2 T, 3T]$; however, for isolated structures, it is more desirable to use $[0.2 T, 1.5 T]$, since the periods for isolated structures are already high. The choice of $T$ is then selected as a typical average period for isolated structure $T_{isol}$. This was previously chosen as 3.0 seconds, but can be lower based on the range of isolated structures considered.
+		\item Spectral pseudoacceleration of a building damped linear elastic SDOF with a period equal to the fixed base period of the structure
+			$$Sa(T_{fb}, \zeta = \zeta_M) = \omega_{fb}^2 \cdot \max_t \left | u(t) \right | $$
+		This is dependent on knowing the fixed base period of the structure.
+		\item Spectral pseudoacceleration of a building damped linear elastic SDOF with a period equal to the post-sliding period of the structure
+			$$Sa(T_2, \zeta = \zeta_M) = \omega_2^2 \cdot \max_t \left | u(t) \right | $$
+		This is dependent on knowing the post-sliding period of the structure.
+		\item Spectral pseudoacceleration of a building damped linear elastic SDOF with a period equal to the effective period of the structure
+			$$Sa(T_M, \zeta = \zeta_M) = \omega_M^2 \cdot \max_t \left | u(t) \right | $$
+		This is dependent on knowing the period of the structure. This is selected because isolated structures may be influenced by pulses with higher periods (lower frequencies).
+		\item Maximum instantaneous power of the ground motion, with respect to the effective period of the structure
+			$$ IP(T_M) = \max \left ( \frac{1}{\Delta t} \int_{t}^{t + \Delta t} V_{filtered}^2 (t) dt \right ) $$
+		where $\Delta t$, the window for integration is a function of $T_M$, $\Delta t = 0.5 T_M$.
+		\item Filtered incremental velocity, with respect to the effective period of the structure
+			$$ FIV3(T_M) = \max \left ( V_{s, max, 1} + V_{s, max, 2} + V_{s, max, 3}, \left | V_{s, min, 1} + V_{s, min, 2} + V_{s, min, 3} \right | \right )$$
+		where $V_{s, i}$ are the local maxima and minima of $V_s(t)$, and 
+			$$ V_s(t) = \int_{t}^{t + 0.7 T_M} \ddot{u}_{gf} (\tau) d \tau $$
+		is the integrated velocity from the filtered acceleration of the ground motion.
+	\end{enumerate}
+	
+\subsection{Dimensionless variables}
+
+With both ground motion variables and structure variables set up, we can create dimensionless variables as combinations of the two:
+
+	\begin{enumerate}
+		\item $\frac{ Sa_{avg}(T, \zeta = \zeta_M) }{ S_{M, amp} }$
+		\item $\frac{ Sa_{avg}(T, \zeta = \zeta_M) }{ S_{M} }$
+		\item $\frac{ Sa(T_2, \zeta = \zeta_M) }{ S_{M, amp} }$
+		\item $\frac{ Sa(T_2, \zeta = \zeta_M) }{ S_{M} }$
+		\item $\frac{ Sa(T_M, \zeta = \zeta_M) }{ S_{M, amp} }$
+		\item $\frac{ Sa(T_M, \zeta = \zeta_M) }{ S_{M} }$
+		\item $\frac{IP(T_M)}{ S_{M, amp} \cdot  D_M}$
+		\item $\frac{PGA}{ S_{M, amp} \cdot g}$
+		\item $\frac{PGV}{ S_{M, amp} \cdot T_M \cdot g}$
+		\item $\frac{FIV3}{ S_{M, amp} \cdot T_M \cdot g}$
+		\item $\frac{IP(T_M)}{ S_{M} \cdot  D_M}$
+		\item $\frac{FIV3}{ S_{M} \cdot T_M \cdot g}$
+	\end{enumerate}
+	
+
+
+\end{document}

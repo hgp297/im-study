@@ -1,0 +1,1503 @@
+---
+title: "Isolator data learning"
+author: "Huy Pham"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: rmarkdown::pdf_document
+urlcolor: magenta
+---
+
+# Data loading
+
+```{r setup, include=FALSE, echo = T, results = 'hide'}
+library(ggplot2)
+library(tidyverse)
+library(pscl)
+library(ResourceSelection)
+library(caret)
+
+rm(list = ls())
+
+point.col = rgb(red=0.3, green=0.3, blue=0.3, alpha=0.4)  # point color for the plots
+par(mfrow = c(2,2))
+```
+
+Limit ground motions to only those with scale factor less than 20.
+
+```{r}
+# current data set also includes manual bandpass and Mag&Rjb
+dataPath <- './imStudyDataFull.csv'
+isol.full <- read.csv(dataPath, header=TRUE) %>% 
+  filter(GMScale <= 20) %>% filter(GMSTfb <= 5)
+```
+
+
+
+Organize outputs. Currently, we record maximum interstory drift and any collapse between the three levels.
+```{r}
+isol.full$maxDrift <- pmax(isol.full$driftMax1, isol.full$driftMax2, isol.full$driftMax3)
+isol.full$collapse <- ((isol.full$collapseDrift1 | isol.full$collapseDrift2) |
+  isol.full$collapseDrift3) %>%
+  as.integer()
+
+isol.full$collapseFac <- ((isol.full$collapseDrift1 | isol.full$collapseDrift2) |
+  isol.full$collapseDrift3) %>%
+  as.factor()
+
+isol.full$impactFac <- isol.full$impacted %>% as.logical %>% as.factor()
+
+# isol.full <- filter(isol.full, impacted == 0)
+
+```
+
+Optionally, gather the dimensionless variables
+
+```{r}
+zetaRef     <- c(0.02, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50)
+BmRef       <- c(0.8, 1.0, 1.2, 1.5, 1.7, 1.9, 2.0)
+tmp <- unlist(approx(zetaRef, BmRef, isol.full$zetaM)[2])
+isol.full$Bm  <- tmp
+
+g <- 386.4
+
+# nondims
+isol.full$TfbRatio <- isol.full$Tfb/isol.full$Tm
+isol.full$mu2Ratio <- isol.full$mu2/(isol.full$GMSTm / isol.full$Bm)
+isol.full$gapRatio <- isol.full$moatGap*4*pi^2/((isol.full$GMSTm/isol.full$Bm) *
+                                       g * isol.full$Tm^2)
+isol.full$T2Ratio <- isol.full$T2/isol.full$Tm
+isol.full$Qm <- isol.full$mu2*g
+```
+
+# Collect intensity measures
+
+Function to get design spectral acceleration
+
+```{r}
+getDesignSa <- function(Tquery, S1) {
+  Ss <- 2.2815
+  Tshort <- S1/Ss
+  if (Tquery < Tshort) {
+    SaTquery <- S1
+  } else {
+    SaTquery <- S1/Tquery
+  }
+  return(SaTquery)
+}
+
+getSaAvgTm <- function(Tm, S1) {
+  TRange <- seq(0.01, 6, length.out = 100)
+  
+  Ss <- 2.2815
+  Tshort <- S1/Ss
+  
+  Tquery <- TRange[(TRange <= 1.5*Tm) & (TRange >= 0.2*Tm)]
+  
+  SaRange <- rep(0, times = length(Tquery))
+  
+  for (i in seq_along(Tquery)) {
+    if (Tquery[i] < Tshort) {
+      SaRange[i] <- S1
+    } else {
+      SaRange[i] <- S1/Tquery[i]
+    }
+  }
+  
+  SaAvgTm <- prod(SaRange)^(1/length(Tquery))
+  return(SaAvgTm)
+}
+```
+
+## Collect the structure IMs
+
+```{r}
+isol.full$SmAmp <- isol.full$moatGap*4*pi^2*isol.full$Bm/(g*isol.full$Tm^2)
+isol.full$Sm <- mapply(getDesignSa, isol.full$Tm, isol.full$S1) * isol.full$Bm
+isol.full$Sfb <- mapply(getDesignSa, isol.full$Tfb, isol.full$S1)
+isol.full$SaAvgTm <- mapply(getSaAvgTm, isol.full$Tm, isol.full$S1)
+
+```
+
+## Collect the ground motion IMs
+
+Ground motion IMs are currently GMSTm, GMST2, GMSavg.
+
+Dimensionless variables:
+
+  \begin{enumerate}
+		\item $\frac{ Sa_{avg}(T, \zeta = \zeta_M) }{ S_{M, amp} }$
+		\item $\frac{ Sa_{avg}(T, \zeta = \zeta_M) }{ S_{M} }$
+		\item $\frac{ Sa(T_2, \zeta = \zeta_M) }{ S_{M, amp} }$
+		\item $\frac{ Sa(T_2, \zeta = \zeta_M) }{ S_{M} }$
+		\item $\frac{ Sa(T_M, \zeta = \zeta_M) }{ S_{M, amp} }$
+		\item $\frac{ Sa(T_M, \zeta = \zeta_M) }{ S_{M} }$
+		\item $\frac{IP(T_M)}{ S_{M, amp} \cdot  D_M}$
+		\item $\frac{PGA}{ S_{M, amp} \cdot g}$
+		\item $\frac{PGV}{ S_{M, amp} \cdot T_M \cdot g}$
+		\item $\frac{FIV3}{ S_{M, amp} \cdot T_M \cdot g}$
+		\item $\frac{IP(T_M)}{ S_{M} \cdot  D_M}$
+		\item $\frac{FIV3}{ S_{M} \cdot T_M \cdot g}$
+	\end{enumerate}
+
+```{r}
+isol.full$Pi1a <- isol.full$GMSavg/isol.full$SmAmp*isol.full$Bm
+isol.full$Pi1b <- isol.full$GmSavgTm/isol.full$SmAmp*isol.full$Bm
+isol.full$Pi2a <- isol.full$GMSavg/isol.full$Sm*isol.full$Bm
+isol.full$Pi2b <- isol.full$GmSavgTm/isol.full$Sm*isol.full$Bm
+isol.full$Pi3 <- isol.full$GMST2/isol.full$SmAmp*isol.full$Bm
+isol.full$Pi4 <- isol.full$GMST2/isol.full$Sm*isol.full$Bm
+isol.full$Pi5 <- isol.full$GMSTm/isol.full$SmAmp*isol.full$Bm
+isol.full$Pi6 <- isol.full$GMSTm/isol.full$Sm*isol.full$Bm
+isol.full$Pi7 <- isol.full$IPTm/(isol.full$SmAmp*g*isol.full$moatGap)
+isol.full$Pi8 <- isol.full$PGA/(isol.full$SmAmp*g)
+isol.full$Pi9 <- isol.full$PGV/(isol.full$SmAmp*g*isol.full$Tm)
+isol.full$Pi10 <- isol.full$FIV3Tm/(isol.full$SmAmp*g*isol.full$Tm)
+isol.full$Pi11 <- isol.full$IPTm/(isol.full$Sm*g*isol.full$moatGap)
+isol.full$Pi12 <- isol.full$FIV3Tm/(isol.full$Sm*g*isol.full$Tm)
+```
+
+
+# Logit regression: Collapse
+
+Split data into test and training set.
+
+```{r}
+set.seed(1)
+
+isol.train <- isol.full %>% sample_frac(0.8)
+isol.test <- isol.full %>% setdiff(isol.train)
+```
+
+Make functions for logistic regression and plotting with respect to collapse.
+
+```{r}
+
+logiStudy <- function(piVar, train, test) {
+  logitModel <- glm(paste("collapse ~ ", piVar), family=binomial(link = "logit"), 
+                       data = train)
+  summary(logitModel)
+  confint(logitModel)
+  test.prob <- logitModel %>% predict(test, type = "response")
+  test.collapse <- ifelse(test.prob > 0.5, 1, 0)
+  
+  test.accuracy <- mean(test.collapse == test$collapse)
+  
+  # get 95% confidence interval plotted (NOT prediction intervals)
+  preds <- logitModel %>% predict(train, type = 'link', se.fit = TRUE)
+  critval <- 1.96
+  upr <- logitModel$family$linkinv(preds$fit + (critval * preds$se.fit))
+  lwr <- logitModel$family$linkinv(preds$fit - (critval * preds$se.fit))
+  fit <- logitModel$family$linkinv(preds$fit)
+  
+  prediction <- cbind(fit, upr, lwr)
+  
+  # overdispersion check = residual deviance/ residual df (ideally close to 1)
+  phi <- deviance(logitModel)/df.residual(logitModel)
+  
+  # use two models to check overdispersion
+  logit.od <- glm(paste("collapse ~ ", piVar), 
+                  family=quasibinomial(link = "logit"), 
+                       data = train)
+  
+  # check if there is evidence that the variance of the two models are different
+  pval <- pchisq(summary(logit.od)$dispersion * logitModel$df.residual,
+                 logitModel$df.residual, lower = FALSE)
+
+  # pseudo R^2
+  pseuR2 = pR2(logitModel)['McFadden']
+  
+  if (pval < 0.05) {
+    print("overdispersion detected")
+  }
+  
+  # hosmer-lemeshow goodness of fit test
+  hlTest <- hoslem.test(x = train$collapse, fitted(logitModel), g=10)
+  
+  return(list(classification = logitModel, 
+              accuracy = test.accuracy, 
+              phi.od = phi,
+              deviance = logitModel$deviance,
+              pseudo.R2 = pseuR2,
+              hoslem = hlTest,
+              prediction = prediction))
+}
+
+logiPlot <- function(dataSet, xvar, predDat) {
+  dataSet <- cbind(dataSet, predDat)
+    ggplot(data = dataSet, aes_string(x = xvar, y = "collapse")) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = xvar,
+      y = "Probability of collapse"
+    )
+}
+
+logiKFold <- function(piVar, data.train, data.test) {
+  ctrl <- trainControl(method = "repeatedcv", number = 10, 
+                       savePredictions = TRUE)
+  model <- train(data.train[piVar],
+                 data.train[["collapseFac"]],
+                 trControl = ctrl,
+                 method = "glm",
+                 family=binomial(link = "logit"))
+  
+  pred <- predict(model, newdata = data.test)
+  confusionMatrix(data=pred, data.test$collapseFac)
+  
+  return(list(kfold.logistic = model, test.prediction = pred))
+}
+```
+
+
+## Mega aggregator for running all logistic regressions
+
+```{r}
+varList <- c("Savg3.amp",
+             "SavgTm.amp",
+             "Savg3.unamp",
+             "SavgTm.unamp",
+             "SaT2.amp",
+             "SaT2.unamp",
+             "SaTm.amp",
+             "SaTm.unamp",
+             "IPTm.amp",
+             "PGA.amp",
+             "PGV.amp",
+             "FIV.amp",
+             "IPTm.unamp",
+             "FIV.unamp")
+piList <- list("Pi1a", "Pi1b", "Pi2a", "Pi2b", "Pi3", "Pi4", "Pi5", "Pi6", "Pi7",
+             "Pi8", "Pi9", "Pi10", "Pi11", "Pi12")
+results <- list()
+
+for (i in seq_along(piList)) {
+  logi_obj <- logiStudy(piList[[i]], isol.train, isol.test)
+  logik_obj <- logiKFold(piList[[i]], isol.train, isol.test)
+  logi_cm <- confusionMatrix(data=logik_obj$test.prediction, isol.test$collapseFac)
+  print(logiPlot(isol.train, piList[[i]], logi_obj$prediction))
+  tmp <- c(logi_obj$accuracy,
+           logi_obj$phi.od,
+           logi_obj$deviance,
+           logi_obj$pseudo.R2,
+           logi_cm$overall)
+  names(tmp) <- c("accuracy", "phi.od", "deviance", "pseudo.R2", "10-fold accuracy",
+                  "kappa", "lower_CI", "upper_CI", "NIR", "p-value(acc>NIR)", "McNemar")
+  results[[i]] <- tmp
+}
+
+df <- as.data.frame(results)
+
+logi_dispersion <- as.data.frame(t(as.matrix(df)))
+row.names(logi_dispersion) <- varList
+logi_dispersion$variable <- varList
+logi_dispersion$GM_IM <- c("Savg3",
+             "SavgTm",
+             "Savg3",
+             "SavgTm",
+             "SaT2",
+             "SaT2",
+             "SaTm",
+             "SaTm",
+             "IPTm",
+             "PGA",
+             "PGV",
+             "FIV",
+             "IPTm",
+             "FIV")
+
+logi_dispersion$bldg_IM <- c("Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm")
+```
+
+
+Plotting dispersion parameters
+
+```{r}
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    logi_dispersion$deviance)
+ggplot(data=logi_dispersion, aes(x = variable, y = deviance, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    -logi_dispersion$pseudo.R2)
+ggplot(data=logi_dispersion, aes(x = variable, y = pseudo.R2, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    -logi_dispersion$accuracy)
+ggplot(data=logi_dispersion, aes(x = variable, y = accuracy, 
+                                 ymin = lower_CI, ymax = upper_CI, 
+                                 color=bldg_IM)) + 
+  geom_pointrange() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  geom_hline(aes(yintercept=0.688))
+```
+
+################################################################################
+
+# Study in tandem with building stiffness
+
+```{r}
+piVar <- 'Pi6'
+
+mod_1 <- glm(paste("collapse ~ ", piVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+summary(mod_1)
+
+ggplot(data = isol.train, aes_string(x = piVar, y = "collapse")) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = piVar,
+      y = "Probability of collapse"
+    )
+
+mod_2 <- glm(paste("collapse ~ TfbRatio +", piVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+
+summary(mod_2)
+
+anova(mod_1, mod_2, test='LR')
+
+mod_3 <- glm(collapse ~ TfbRatio, family=binomial(link = "logit"), 
+                       data = isol.train)
+
+summary(mod_3)
+
+ggplot(data = isol.train, aes(x=TfbRatio, y=collapse)) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = "TfbRatio",
+      y = "Probability of collapse"
+    )
+```
+
+# Study in tandem with building strength
+
+```{r}
+piVar <- 'Pi6'
+
+mod_1 <- glm(paste("collapse ~ ", piVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+summary(mod_1)
+
+ggplot(data = isol.train, aes_string(x = piVar, y = "collapse")) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = piVar,
+      y = "Probability of collapse"
+    )
+
+mod_2 <- glm(paste("collapse ~ RI +", piVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+
+summary(mod_2)
+
+anova(mod_1, mod_2, test='LR')
+
+mod_3 <- glm(collapse ~ RI, family=binomial(link = "logit"), 
+                       data = isol.train)
+
+summary(mod_3)
+
+ggplot(data = isol.train, aes(x=RI, y=collapse)) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = "Ry",
+      y = "Probability of collapse"
+    )
+```
+
+# Vector IM with IP/FIV
+
+Additionally, consider that a sufficiency study could be done on top of this, a la Zengin's paper.
+
+```{r}
+# Pi7 is amp IP
+# Pi10 is amp FIV
+piVar <- 'Pi5'
+secondPiVar <- 'Pi10'
+
+mod_1 <- glm(paste("collapse ~ ", piVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+summary(mod_1)
+
+ggplot(data = isol.train, aes_string(x = piVar, y = "collapse")) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = piVar,
+      y = "Probability of collapse"
+    )
+
+mod_2 <- glm(paste("collapse ~ ", piVar, "+", secondPiVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+
+summary(mod_2)
+
+anova(mod_1, mod_2, test='LR')
+
+mod_3 <- glm(paste("collapse ~", secondPiVar), family=binomial(link = "logit"), 
+                       data = isol.train)
+
+summary(mod_3)
+
+ggplot(data = isol.train, aes_string(x=secondPiVar, y="collapse")) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='upr'), col="red") + 
+    # geom_line(data=dataSet, mapping=aes_string(x=xvar, y='lwr'), col="red") +
+    labs(
+      title = "Logistic Regression Model", 
+      x = secondPiVar,
+      y = "Probability of collapse"
+    )
+```
+################################################################################
+
+# New spectral normalizations
+
+In the case of spectral average, since the ground motion was initially scaled depending on the spectral average, the ratio between the ground motion spectral average and the design spectral average is just the scale factor used.
+
+```{r}
+isol.full$Pi1 <- isol.full$S1Ampli
+isol.full$Pi2 <- isol.full$GmSavgTm/isol.full$SaAvgTm
+isol.full$Pi3 <- isol.full$GMST2/isol.full$ST2*isol.full$Bm
+isol.full$Pi4 <- isol.full$GMSTm/isol.full$Sm*isol.full$Bm
+```
+
+
+# Logit regression: Collapse
+
+Split data into test and training set.
+
+```{r}
+set.seed(1)
+
+isol.train <- isol.full %>% sample_frac(0.8)
+isol.test <- isol.full %>% setdiff(isol.train)
+```
+
+
+## Mega aggregator for running all logistic regressions
+
+```{r}
+varList <- c("Savg3.ratio",
+             "SavgTm.ratio",
+             "SaT2.ratio",
+             "SaTm.ratio")
+piList <- list("Pi1", "Pi2", "Pi3", "Pi4")
+results <- list()
+
+for (i in seq_along(piList)) {
+  logi_obj <- logiStudy(piList[[i]], isol.train, isol.test)
+  logik_obj <- logiKFold(piList[[i]], isol.train, isol.test)
+  logi_cm <- confusionMatrix(data=logik_obj$test.prediction, 
+                             isol.test$collapseFac)
+  print(logiPlot(isol.train, piList[[i]]))
+  tmp <- c(logi_obj$accuracy,
+           logi_obj$phi.od,
+           logi_obj$deviance,
+           logi_obj$pseudo.R2,
+           logi_cm$overall)
+  names(tmp) <- c("accuracy", "phi.od", "deviance", "pseudo.R2", "10-fold accuracy",
+                  "kappa", "lower_CI", "upper_CI", "NIR", "p-value(acc>NIR)", "McNemar")
+  results[[i]] <- tmp
+}
+
+df <- as.data.frame(results)
+
+logi_dispersion <- as.data.frame(t(as.matrix(df)))
+row.names(logi_dispersion) <- varList
+logi_dispersion$variable <- varList
+logi_dispersion$GM_IM <- varList
+
+logi_dispersion$bldg_IM <- varList
+```
+
+
+Plotting dispersion parameters
+
+```{r}
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    logi_dispersion$deviance)
+ggplot(data=logi_dispersion, aes(x = variable, y = deviance, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    -logi_dispersion$pseudo.R2)
+ggplot(data=logi_dispersion, aes(x = variable, y = pseudo.R2, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    -logi_dispersion$accuracy)
+ggplot(data=logi_dispersion, aes(x = variable, y = accuracy, 
+                                 ymin = lower_CI, ymax = upper_CI, 
+                                 color=bldg_IM)) + 
+  geom_pointrange() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  geom_hline(aes(yintercept=0.688))
+```
+
+
+## Quick FWL check
+
+Regress Pi1 on Pi2 to get residual
+
+```{r}
+# pi.lm <- lm(Pi2 ~ Pi1, data = isol.full)
+# Pi2.tilde <- pi.lm$residuals
+# maxDrift <- isol.full$maxDrift
+# fwl.lm <- lm(maxDrift ~ Pi2.tilde)
+# summary(fwl.lm)
+# plot(fwl.lm)
+```
+################################################################################
+# Logit regression: Impact
+
+Split data into test and training set.
+
+```{r}
+set.seed(1)
+
+isol.train <- isol.full %>% sample_frac(0.8)
+isol.test <- isol.full %>% setdiff(isol.train)
+```
+
+Make functions for logistic regression and plotting with respect to collapse.
+
+```{r}
+logiStudy <- function(piVar, train, test) {
+  logitModel <- glm(paste("impacted ~ ", piVar), family=binomial(link = "logit"), 
+                       data = train)
+  summary(logitModel)
+  confint(logitModel)
+  test.prob <- logitModel %>% predict(test, type = "response")
+  test.impacted <- ifelse(test.prob > 0.5, 1, 0)
+  
+  test.accuracy <- mean(test.impacted == test$impacted)
+  
+  # overdispersion check = residual deviance/ residual df (ideally close to 1)
+  phi <- deviance(logitModel)/df.residual(logitModel)
+  
+  # use two models to check overdispersion
+  logit.od <- glm(paste("impacted ~ ", piVar), family=quasibinomial(link = "logit"), 
+                       data = train)
+  
+  # check if there is evidence that the variance of the two models are different
+  pval <- pchisq(summary(logit.od)$dispersion * logitModel$df.residual,
+                 logitModel$df.residual, lower = FALSE)
+
+  # pseudo R^2
+  pseuR2 = pR2(logitModel)['McFadden']
+  
+  if (pval < 0.05) {
+    print("overdispersion detected")
+  }
+  
+  # hosmer-lemeshow goodness of fit test
+  hlTest <- hoslem.test(x = train$impacted, fitted(logitModel), g=10)
+  
+  return(list(classification = logitModel, 
+              accuracy = test.accuracy, 
+              phi.od = phi,
+              deviance = logitModel$deviance,
+              pseudo.R2 = pseuR2,
+              hoslem = hlTest))
+}
+
+logiPlot <- function(dataSet, xvar) {
+    ggplot(data = dataSet, aes_string(x = xvar, y = "impacted")) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+    labs(
+      title = "Logistic Regression Model", 
+      x = xvar,
+      y = "Probability of impact"
+    )
+}
+
+logiKFold <- function(piVar, data.train, data.test) {
+  ctrl <- trainControl(method = "repeatedcv", number = 10, savePredictions = TRUE)
+  model <- train(data.train[piVar],
+                 data.train[["impactFac"]],
+                 trControl = ctrl,
+                 method = "glm",
+                 family=binomial(link = "logit"))
+  
+  pred <- predict(model, newdata = data.test)
+  confusionMatrix(data=pred, data.test$impactFac)
+  
+  return(list(kfold.logistic = model, test.prediction = pred))
+}
+```
+
+
+## Mega aggregator for running all logistic regressions
+
+```{r}
+varList <- c("Savg3.amp",
+             "SavgTm.amp",
+             "Savg3.unamp",
+             "SavgTm.unamp",
+             "SaT2.amp",
+             "SaT2.unamp",
+             "SaTm.amp",
+             "SaTm.unamp",
+             "IPTm.amp",
+             "PGA.amp",
+             "PGV.amp",
+             "FIV.amp",
+             "IPTm.unamp",
+             "FIV.unamp")
+piList <- list("Pi1a", "Pi1b", "Pi2a", "Pi2b", "Pi3", "Pi4", "Pi5", "Pi6", "Pi7",
+             "Pi8", "Pi9", "Pi10", "Pi11", "Pi12")
+results <- list()
+
+for (i in seq_along(piList)) {
+  logi_obj <- logiStudy(piList[[i]], isol.train, isol.test)
+  logik_obj <- logiKFold(piList[[i]], isol.train, isol.test)
+  logi_cm <- confusionMatrix(data=logik_obj$test.prediction, isol.test$impactFac)
+  print(logiPlot(isol.train, piList[[i]]))
+  tmp <- c(logi_obj$accuracy,
+           logi_obj$phi.od,
+           logi_obj$deviance,
+           logi_obj$pseudo.R2,
+           logi_cm$overall)
+  names(tmp) <- c("accuracy", "phi.od", "deviance", "pseudo.R2", "10-fold accuracy",
+                  "kappa", "lower_CI", "upper_CI", "NIR", "p-value(acc>NIR)", "McNemar")
+  results[[i]] <- tmp
+}
+
+df <- as.data.frame(results)
+
+logi_dispersion <- as.data.frame(t(as.matrix(df)))
+row.names(logi_dispersion) <- varList
+logi_dispersion$variable <- varList
+logi_dispersion$GM_IM <- c("Savg3",
+             "SavgTm",
+             "Savg3",
+             "SavgTm",
+             "SaT2",
+             "SaT2",
+             "SaTm",
+             "SaTm",
+             "IPTm",
+             "PGA",
+             "PGV",
+             "FIV",
+             "IPTm",
+             "FIV")
+
+logi_dispersion$bldg_IM <- c("Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm")
+```
+
+
+Plotting dispersion parameters
+
+```{r}
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    logi_dispersion$deviance)
+ggplot(data=logi_dispersion, aes(x = variable, y = deviance, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    -logi_dispersion$pseudo.R2)
+ggplot(data=logi_dispersion, aes(x = variable, y = pseudo.R2, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+logi_dispersion$variable <- reorder(logi_dispersion$variable, 
+                                    -logi_dispersion$accuracy)
+ggplot(data=logi_dispersion, aes(x = variable, y = accuracy, 
+                                 ymin = lower_CI, ymax = upper_CI, 
+                                 color=bldg_IM)) + 
+  geom_pointrange() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  geom_hline(aes(yintercept=0.5714))
+```
+
+################################################################################
+
+# Power regression: maximum interstory drift
+
+## Functions
+
+Utility function for prediction interval
+
+```{r}
+caretTrainNewdata <- function(object, newdata, na.action = na.omit){
+    if (!is.null(object$modelInfo$library)) 
+        for (i in object$modelInfo$library) do.call("requireNamespaceQuietStop", 
+                                                    list(package = i))
+    if (!is.null(newdata)) {
+        if (inherits(object, "train.formula")) {
+            newdata <- as.data.frame(newdata)
+            rn <- row.names(newdata)
+            Terms <- delete.response(object$terms)
+            m <- model.frame(Terms, newdata, na.action = na.action, 
+                             xlev = object$xlevels)
+            if (!is.null(cl <- attr(Terms, "dataClasses"))) 
+                .checkMFClasses(cl, m)
+            keep <- match(row.names(m), rn)
+            newdata <- model.matrix(Terms, m, contrasts = object$contrasts)
+            xint <- match("(Intercept)", colnames(newdata), 
+                          nomatch = 0)
+            if (xint > 0) 
+                newdata <- newdata[, -xint, drop = FALSE]
+        }
+    }
+    else if (object$control$method != "oob") {
+        if (!is.null(object$trainingData)) {
+            if (object$method == "pam") {
+                newdata <- object$finalModel$xData
+            }
+            else {
+                newdata <- object$trainingData
+                newdata$.outcome <- NULL
+                if ("train.formula" %in% class(object) && 
+                    any(unlist(lapply(newdata, is.factor)))) {
+                    newdata <- model.matrix(~., data = newdata)[, 
+                                                                -1]
+                    newdata <- as.data.frame(newdata)
+                }
+            }
+        }
+        else stop("please specify data via newdata")
+    } else
+        stop("please specify data data via newdata")
+    if ("xNames" %in% names(object$finalModel) & is.null(object$preProcess$method$pca) & 
+        is.null(object$preProcess$method$ica)) 
+        newdata <- newdata[, colnames(newdata) %in% object$finalModel$xNames, 
+                           drop = FALSE]
+    if(!is.null(object$preProcess))
+       newdata <- predict(preProc, newdata)
+    if(!is.data.frame(newdata) && 
+      !is.null(object$modelInfo$predict) && 
+      any(grepl("as.data.frame", as.character(body(object$modelInfo$predict)))))
+           newdata <- as.data.frame(newdata)
+    newdata
+}
+```
+
+All regression and plotting functions. Temporarily removed cross-validation.
+
+```{r}
+logLmStudy <- function(piVar, driftDat) {
+  ctrl <- trainControl(method = "repeatedcv", number = 10,
+                       savePredictions = TRUE)
+
+  logLmModel <- train(as.formula(paste("maxDrift ~ impacted +", piVar)),
+                      data = driftDat,
+                 trControl = ctrl,
+                 method = "lm")
+  
+  # logLmModel <- lm(paste("maxDrift ~ impacted +", piVar), data=driftDat)
+  # predDat <- predict(logLmModel, interval='prediction')
+  
+  results <- summary(logLmModel)
+  
+  driftNewData <- caretTrainNewdata(logLmModel, driftDat)
+  predDat <- predict(logLmModel$finalModel, driftNewData, interval="prediction")
+  
+  residual.se <- results$sigma
+  r.squared <- results$r.squared
+  
+  return(list(residual.se = residual.se, 
+              R2 = r.squared,
+              prediction = predDat))
+}
+
+
+logLmPlot <- function(driftDat, xvar, predDat) {
+  driftDat <- cbind(driftDat, predDat)
+  ggplot(driftDat, aes_string(x = xvar, y = "maxDrift", color = "impacted")) +
+    geom_point() +
+    # geom_line(aes(y=lwr), color = "red", linetype = "dashed")+
+    # geom_line(aes(y=upr), color = "red", linetype = "dashed")+
+    stat_smooth(method = 'lm', col = 'red') +
+    labs(
+      title = "Power Regression Model", 
+      x = xvar,
+      y = "Peak interstory drift"
+    )
+}
+
+isol.full$periodRatio <- isol.full$Tfb/(isol.full$Tm*isol.full$Sm)
+
+fbPlot <- function(driftDat) {
+  ggplot(driftDat, aes_string(x = "periodRatio", y = "maxDrift")) +
+    geom_point() +
+    geom_smooth(method = 'lm', col = 'red', level=0.95) +
+    labs(
+      title = "Power Regression Model", 
+      x = "periodRatio",
+      y = "maxDrift"
+    )
+}
+```
+
+
+Create new data frame of the logarithm data.
+
+```{r}
+varList <- c("Savg3.amp",
+             "SavgTm.amp",
+             "Savg3.unamp",
+             "SavgTm.unamp",
+             "SaT2.amp",
+             "SaT2.unamp",
+             "SaTm.amp",
+             "SaTm.unamp",
+             "IPTm.amp",
+             "PGA.amp",
+             "PGV.amp",
+             "FIV.amp",
+             "IPTm.unamp",
+             "FIV.unamp")
+piList <- list("Pi1a", "Pi1b", "Pi2a", "Pi2b", "Pi3", "Pi4", "Pi5", "Pi6", "Pi7",
+             "Pi8", "Pi9", "Pi10", "Pi11", "Pi12")
+
+colList <- unlist(piList)
+colList <- c(colList, 'maxDrift', 'TfbRatio')
+isol.log <- isol.full[, colList] %>% log(base = 10)
+isol.log$impacted <- isol.full$impacted
+isol.log$Rjb <- isol.full$Rjb
+isol.log$Magnitude <- isol.full$Magnitude
+isol.log$Arias <- isol.full$Arias
+isol.log$Duration595 <- isol.full$Duration595
+
+isol.log.hit <- isol.log %>% filter(impacted == 1)
+isol.log.miss <- isol.log %>% filter(impacted == 0)
+```
+
+Split data again for cross validation.
+
+```{r}
+set.seed(1)
+
+isol.log.train <- isol.log %>% sample_frac(0.8)
+isol.log.test <- isol.log %>% setdiff(isol.log.train)
+```
+
+## Mega aggregator for full regression on impacted and IM
+
+```{r}
+
+results <- list()
+
+for (i in seq_along(piList)) {
+  logLmObj <- logLmStudy(piList[[i]], isol.log)
+  print(logLmPlot(isol.log, piList[[i]], logLmObj$prediction))
+  tmp <- c(logLmObj$residual.se,
+           logLmObj$R2)
+  names(tmp) <- c("residual.standard.error", "R2")
+  results[[i]] <- tmp
+}
+
+df <- as.data.frame(results)
+
+logLm_dispersion <- as.data.frame(t(as.matrix(df)))
+row.names(logLm_dispersion) <- varList
+logLm_dispersion$variable <- varList
+logLm_dispersion$GM_IM <- c("Savg3",
+             "SavgTm",
+             "Savg3",
+             "SavgTm",
+             "SaT2",
+             "SaT2",
+             "SaTm",
+             "SaTm",
+             "IPTm",
+             "PGA",
+             "PGV",
+             "FIV",
+             "IPTm",
+             "FIV")
+
+logLm_dispersion$bldg_IM <- c("Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm")
+```
+
+Plotting dispersion parameters
+
+```{r}
+logLm_dispersion$variable <- reorder(logLm_dispersion$variable, 
+                                     logLm_dispersion$residual.standard.error)
+ggplot(data=logLm_dispersion, aes(x = variable, y = residual.standard.error, 
+                                  fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+
+logLm_dispersion$variable <- reorder(logLm_dispersion$variable, 
+                                     -logLm_dispersion$R2)
+ggplot(data=logLm_dispersion, aes(x = variable, y = R2, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+```
+
+
+## Conditioned on impact, regress on just IM
+
+```{r}
+
+logLmStudy <- function(piVar, driftDat) {
+  ctrl <- trainControl(method = "repeatedcv", number = 10,
+                       savePredictions = TRUE)
+
+  logLmModel <- train(as.formula(paste("maxDrift ~ ", piVar)),
+                      data = driftDat,
+                 trControl = ctrl,
+                 method = "lm")
+  
+  # logLmModel <- lm(paste("maxDrift ~ impacted +", piVar), data=driftDat)
+  # predDat <- predict(logLmModel, interval='prediction')
+  
+  results <- summary(logLmModel)
+  
+  driftNewData <- caretTrainNewdata(logLmModel, driftDat)
+  predDat <- predict(logLmModel$finalModel, driftNewData, interval="prediction")
+  
+  residual.se <- results$sigma
+  r.squared <- results$r.squared
+  
+  return(list(residual.se = residual.se, 
+              R2 = r.squared,
+              prediction = predDat))
+}
+
+
+logLmPlot <- function(driftDat, xvar, predDat) {
+  driftDat <- cbind(driftDat, predDat)
+  ggplot(driftDat, aes_string(x = xvar, y = "maxDrift")) +
+    geom_point() +
+    geom_line(aes(y=lwr), color = "red", linetype = "dashed")+
+    geom_line(aes(y=upr), color = "red", linetype = "dashed")+
+    stat_smooth(method = 'lm', col = 'red') +
+    labs(
+      title = "Power Regression Model", 
+      x = xvar,
+      y = "Peak interstory drift"
+    )
+}
+
+results <- list()
+
+for (i in seq_along(piList)) {
+  logLmObj <- logLmStudy(piList[[i]], isol.log.hit)
+  print(logLmPlot(isol.log.hit, piList[[i]], logLmObj$prediction))
+  tmp <- c(logLmObj$residual.se,
+           logLmObj$R2)
+  names(tmp) <- c("residual.standard.error", "R2")
+  results[[i]] <- tmp
+}
+
+df <- as.data.frame(results)
+
+logLm_dispersion.hit <- as.data.frame(t(as.matrix(df)))
+row.names(logLm_dispersion.hit) <- varList
+logLm_dispersion.hit$variable <- varList
+logLm_dispersion.hit$GM_IM <- c("Savg3",
+             "SavgTm",
+             "Savg3",
+             "SavgTm",
+             "SaT2",
+             "SaT2",
+             "SaTm",
+             "SaTm",
+             "IPTm",
+             "PGA",
+             "PGV",
+             "FIV",
+             "IPTm",
+             "FIV")
+
+logLm_dispersion.hit$bldg_IM <- c("Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm")
+
+logLm_dispersion.hit$variable <- reorder(logLm_dispersion.hit$variable, 
+                                     logLm_dispersion.hit$residual.standard.error)
+ggplot(data=logLm_dispersion.hit, aes(x = variable, y = residual.standard.error, 
+                                  fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+
+logLm_dispersion.hit$variable <- reorder(logLm_dispersion.hit$variable, 
+                                     -logLm_dispersion.hit$R2)
+ggplot(data=logLm_dispersion.hit, aes(x = variable, y = R2, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+```
+
+## Conditioned on NO impact, regress on just IM
+
+```{r}
+
+results <- list()
+
+for (i in seq_along(piList)) {
+  logLmObj <- logLmStudy(piList[[i]], isol.log.miss)
+  print(logLmPlot(isol.log.miss, piList[[i]], logLmObj$prediction))
+  tmp <- c(logLmObj$residual.se,
+           logLmObj$R2)
+  names(tmp) <- c("residual.standard.error", "R2")
+  results[[i]] <- tmp
+}
+
+df <- as.data.frame(results)
+
+logLm_dispersion.miss <- as.data.frame(t(as.matrix(df)))
+row.names(logLm_dispersion.miss) <- varList
+logLm_dispersion.miss$variable <- varList
+logLm_dispersion.miss$GM_IM <- c("Savg3",
+             "SavgTm",
+             "Savg3",
+             "SavgTm",
+             "SaT2",
+             "SaT2",
+             "SaTm",
+             "SaTm",
+             "IPTm",
+             "PGA",
+             "PGV",
+             "FIV",
+             "IPTm",
+             "FIV")
+
+logLm_dispersion.miss$bldg_IM <- c("Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm_amp",
+             "Sm",
+             "Sm")
+
+logLm_dispersion.miss$variable <- reorder(logLm_dispersion.miss$variable, 
+                                     logLm_dispersion.miss$residual.standard.error)
+ggplot(data=logLm_dispersion.miss, aes(x = variable, y = residual.standard.error, 
+                                  fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+
+logLm_dispersion.miss$variable <- reorder(logLm_dispersion.miss$variable, 
+                                     -logLm_dispersion.miss$R2)
+ggplot(data=logLm_dispersion.miss, aes(x = variable, y = R2, fill=bldg_IM)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+```
+
+Combine the hit and miss data to compare dispersion of impact conditioned results
+
+```{r}
+logLm_dispersion.miss$impacted <- rep(0, nrow(logLm_dispersion.miss))
+logLm_dispersion.hit$impacted <- rep(1, nrow(logLm_dispersion.hit))
+logLm_dispersion.compare <- rbind(logLm_dispersion.miss, logLm_dispersion.hit)
+
+logLm_dispersion.compare$variable <- reorder(rownames(logLm_dispersion.compare), 
+                                     logLm_dispersion.compare$residual.standard.error)
+ggplot(data=logLm_dispersion.compare, aes(x = variable, y = residual.standard.error, 
+                                  fill=impacted)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+ggplot(data=logLm_dispersion.compare, aes(x = variable, y = residual.standard.error, 
+                                  fill=impacted)) + 
+  geom_col(position = "dodge")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  facet_wrap(~GM_IM, scales="free_x")
+
+logLm_dispersion.compare$variable <- reorder(rownames(logLm_dispersion.compare), 
+                                     -logLm_dispersion.compare$R2)
+ggplot(data=logLm_dispersion.compare, aes(x = variable, y = R2, fill=impacted)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))
+
+ggplot(data=logLm_dispersion.compare, aes(x = variable, y = R2, 
+                                  fill=impacted)) + 
+  geom_col(position = "dodge")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+  facet_wrap(~GM_IM, scales="free_x")
+
+```
+
+
+# Conditioning on impact
+
+```{r}
+for (i in seq_along(piList)) {
+  piVar <- piList[[i]]
+  ctrl <- trainControl(method = "repeatedcv", number = 10, 
+                         savePredictions = TRUE)
+  
+  fit.hit <- lm(paste('maxDrift ~ ', piVar),
+                 data = filter(isol.log, impacted == 1))
+  
+  fit.hit.stats <- summary(fit.hit)
+  
+  fit.miss <- lm(paste('maxDrift ~ ', piVar),
+                 data = filter(isol.log, impacted == 0))
+  
+  fit.miss.stats <- summary(fit.miss)
+  
+  fit.both <- lm(paste('maxDrift ~ impacted + ', piVar), data=isol.log)
+  fit.both.stats <- summary(fit.both)
+  
+  # fit.yw <- lm(maxDrift ~ impacted, data = isol.log)
+  # fit.xw <- lm(paste(piVar, '~ impacted'), data = isol.log)
+  # 
+  # xcor <- isol.log[[piVar]]
+  # 
+  # ryx <- cor(xcor,isol.log$maxDrift, method = "pearson")
+  # ryw <- cor(isol.log$impacted,isol.log$maxDrift, method = "pearson")
+  # rxw <- cor(isol.log$impacted,xcor, method = "pearson")
+  # 
+  # simpson <- (ryx^2 < ryx*ryw*rxw)
+  # xyw <- matrix(c(xcor,isol.log$maxDrift,isol.log$impacted), nrow=length(isol.log), ncol=3)
+  # covMat <- cov(xyw)
+  
+  print(ggplot(isol.log, aes_string(x = piVar, y = 'maxDrift', color = 'impacted')) +
+      geom_point() +
+      geom_smooth(method = 'lm', formula=y~x, col = 'red') + 
+    geom_abline(intercept = fit.hit$coefficients[1], slope = fit.hit$coefficients[2]) +
+    geom_abline(intercept = fit.miss$coefficients[1], slope = fit.miss$coefficients[2]) +
+      labs(
+        title = "Power Regression Model", 
+        x = piVar,
+        y = "maxDrift"
+      ))
+}
+```
+
+# Study in tandem with building stiffness
+
+Something of note is when we condition on the building not experiencing impact, TfbRatio is a more important variable than the IM. When we condition on the building having impact, the IM is way more important than the IM.
+
+```{r}
+###############
+# hit data
+
+piVar <- 'Pi6'
+
+mod.hit_null <- lm(paste("maxDrift ~ ", 1), data = isol.log.hit)
+summary(mod.hit_null)
+
+mod.hit_1 <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
+summary(mod.hit_1)
+
+ggplot(data = isol.log.hit, aes_string(x = piVar, y = "maxDrift")) +
+    geom_point(size = 3, shape = 4, color = 'red') +
+    geom_smooth(method = "lm") +
+    labs(
+      title = "Power regression Model", 
+      x = piVar,
+      y = "Log drift ratio"
+    )
+
+mod.hit_2 <- lm(maxDrift ~ TfbRatio, data = isol.log.hit)
+summary(mod.hit_2)
+
+ggplot(data = isol.log.hit, aes(x=TfbRatio, y=maxDrift)) +
+    geom_point(size = 3, shape = 4, color = 'red') +
+    geom_smooth(method = "lm") +
+    labs(
+      title = "Power regression Model", 
+      x = 'TfbRatio',
+      y = "Log drift ratio"
+    )
+
+anova(mod.hit_1, mod.hit_2, test='LR')
+
+mod.hit_3 <- lm(paste("maxDrift ~ TfbRatio +", piVar), data = isol.log.hit)
+
+summary(mod.hit_3)
+anova(mod.hit_1, mod.hit_2, mod.hit_3, test='LR')
+
+
+AIC(mod.hit_1, mod.hit_2, mod.hit_3)
+
+####################
+# miss data
+piVar <- 'Pi6'
+
+mod.miss_null <- lm(paste("maxDrift ~ ", 1), data = isol.log.miss)
+summary(mod.miss_null)
+
+mod.miss_1 <- lm(paste("maxDrift ~ ", piVar), data = isol.log.miss)
+summary(mod.miss_1)
+
+ggplot(data = isol.log.miss, aes_string(x = piVar, y = "maxDrift")) +
+    geom_point(size = 3, shape = 1, color = 'blue') +
+    geom_smooth(method = "lm") +
+    labs(
+      title = "Power regression Model", 
+      x = piVar,
+      y = "Log drift ratio"
+    )
+
+mod.miss_2 <- lm(maxDrift ~ TfbRatio, data = isol.log.miss)
+summary(mod.miss_2)
+
+ggplot(data = isol.log.miss, aes(x=TfbRatio, y=maxDrift)) +
+    geom_point(size = 3, shape = 1, color = 'blue') +
+    geom_smooth(method = "lm") +
+    labs(
+      title = "Power regression Model", 
+      x = 'TfbRatio',
+      y = "Log drift ratio"
+    )
+
+anova(mod.miss_1, mod.miss_2, test='LR')
+
+mod.miss_3 <- lm(paste("maxDrift ~ TfbRatio +", piVar), data = isol.log.miss)
+
+summary(mod.miss_3)
+anova(mod.miss_1, mod.miss_2, mod.miss_3, test='LR')
+
+AIC(mod.miss_1, mod.miss_2, mod.miss_3)
+```
+
+################################################################################
+# Sufficiency wrt Rjb
+
+```{r}
+
+# moving average
+ma <- function(x, n = 5){stats::filter(x, rep(1 / n, n), sides = 2) %>% 
+    as.vector()}
+
+piVar <- 'Pi11'
+
+mod.single <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
+res.df <- data.frame(mod.single$residuals, isol.log.hit$Rjb)
+colnames(res.df) <- c('residuals', 'Rjb')
+
+res.df$mavg <- ma(res.df$residuals)
+
+summary(mod.single)
+
+ggplot(data = isol.log.hit, aes_string(x = piVar, y = "maxDrift")) +
+    geom_point(size = 3, shape = 4, color = 'red') +
+    geom_smooth(method = "lm") +
+    labs(
+      title = "Power regression Model", 
+      x = piVar,
+      y = "Log drift ratio"
+    )
+
+ggplot(data = isol.log.hit, aes_string(x = piVar, y = "maxDrift")) +
+    geom_point(size = 3, shape = 4, color = 'red') +
+    geom_smooth(method = "lm") +
+    labs(
+      title = "Power regression Model", 
+      x = piVar,
+      y = "Log drift ratio"
+    )
+
+ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
+    geom_point() +
+    geom_line(aes(y=mavg)) +
+    geom_area(aes(x = Rjb, y = mavg), position='identity', alpha = 0.5) + 
+    ylim(-1, 1) +
+    labs(
+      title = "Residuals wrt Rjb", 
+      x = 'Rjb',
+      y = "Residuals on regression with Pi"
+    )
+
+mod.double <- lm(paste("maxDrift ~ Pi6 +", piVar), data = isol.log.hit)
+res.df <- data.frame(mod.double$residuals, isol.log.hit$Rjb)
+colnames(res.df) <- c('residuals', 'Rjb')
+
+res.df$mavg <- ma(res.df$residuals)
+
+summary(mod.double)
+
+ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
+    geom_point() +
+    geom_line(aes(y=mavg)) +
+    geom_area(aes(x = Rjb, y = mavg), position='identity', alpha = 0.5) + 
+    ylim(-1 , 1) +
+    labs(
+      title = "Residuals wrt Rjb", 
+      x = 'Rjb',
+      y = "Residuals on regression with Pi"
+    )
+```
+
+# Eads' sufficiency via hypothesis testing
+```{r}
+piVar <- "Pi11"
+power.mod <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
+
+suf.df <- data.frame(power.mod$fitted.values, isol.log.hit$Rjb)
+colnames(suf.df) <- c('expected.drift', 'Rjb')
+
+rjb.lm <- lm(expected.drift ~ Rjb, data = suf.df)
+summary(rjb.lm)
+```
+
+
+
+################################################################################
+# PCA
+
+## Intensity measures
+
+Run PCA on the various spectral accelerations.
+
+```{r eval=FALSE}
+im.vars <- subset(isol.full, select=c(
+  ST1,ST2,GMSavg,GMS1,GMST1,GMST2,GMSTm
+))
+
+# perform PCA, centering and scaling the data
+im.pca <- prcomp(im.vars, center = TRUE, scale. = TRUE)
+```
+
+
+## Outlier detection
+
+```{r}
+# # compute the distance from the origin given the first three PCs
+# r2 <- im.pca$x[,1]^2 + im.pca$x[,2]^2 + im.pca$x[,3]^2
+# # get the indices of the points sorted in decreasing distance from the origin
+# r2 <- order(r2, decreasing=TRUE)
+# 
+# 
+# plot(im.pca$x[,1], im.pca$x[,2], asp=1, col=point.col)
+# points(im.pca$x[r2[1:3],1], im.pca$x[r2[1:3],2], col='red', pch=5)
+# 
+# # output outlier indices
+# r2[1:3]
+```
+
+# Linear models
+
+## Univariate
+
+Look at one spectral acceleration in its performance of predicting maximum drift.
+
+```{r}
+# fit <- lm(GMSavg ~ maxDrift, data=isol.full)
+# summary(fit)
+# 
+# par(mfrow = c(2,2))
+# plot(fit, col = point.col)
+```
+
+## EHW standard errors
+
+```{r}
+# library(car)
+# fit.hc0 = sqrt(diag(hccm(fit, type="hc0")))
+# fit.hc1 = sqrt(diag(hccm(fit, type="hc1")))
+# fit.hc2 = sqrt(diag(hccm(fit, type="hc2")))
+# fit.hc3 = sqrt(diag(hccm(fit, type="hc3")))
+# fit.hc4 = sqrt(diag(hccm(fit, type="hc4")))
+# fit.coef = summary(fit)$coef
+# tvalues = fit.coef [ ,1] /
+# cbind(fit.coef[ ,2] , fit.hc0 , fit.hc1 ,
+# fit.hc2 , fit.hc3 , fit.hc4)
+# colnames(tvalues) = c("ols",  "hc0", "hc1", "hc2", "hc3", "hc4")
+# round(tvalues , 2)
+```
+
+# Probit regression
+
+```{r}
+# im.full <- subset(isol.full, select=c(
+#   ST1,ST2,GMSavg,GMS1,GMST1,GMST2,GMSTm,collapse
+# ))
+# 
+# im.probit <- glm(collapse ~ ., family = binomial(link="probit"), data=im.full)
+# summary(im.probit)
+```
+

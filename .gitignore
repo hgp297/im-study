@@ -1,3 +1,9 @@
+# acceleration files
+*.AT2
+*.VT2
+*.g3
+*.DT2
+
 # History files
 .Rhistory
 .Rapp.history
