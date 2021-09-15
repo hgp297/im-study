@@ -1353,63 +1353,81 @@ AIC(mod.miss_1, mod.miss_2, mod.miss_3)
 ma <- function(x, n = 5){stats::filter(x, rep(1 / n, n), sides = 2) %>% 
     as.vector()}
 
-piVar <- 'Pi11'
+piVar <- 'Pi8'
 
-mod.single <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
-res.df <- data.frame(mod.single$residuals, isol.log.hit$Rjb)
-colnames(res.df) <- c('residuals', 'Rjb')
-
-res.df$mavg <- ma(res.df$residuals)
+mod.single <- lm(paste("maxDrift ~ ", piVar), data = isol.log.miss)
+res.df <- data.frame(mod.single$residuals, isol.log.miss$Rjb, isol.log.miss$Magnitude)
+colnames(res.df) <- c('residuals', 'Rjb', 'Magnitude')
 
 summary(mod.single)
 
-ggplot(data = isol.log.hit, aes_string(x = piVar, y = "maxDrift")) +
+ggplot(data = isol.log.miss, aes_string(x = piVar, y = "maxDrift")) +
     geom_point(size = 3, shape = 4, color = 'red') +
     geom_smooth(method = "lm") +
     labs(
-      title = "Power regression Model", 
-      x = piVar,
-      y = "Log drift ratio"
-    )
-
-ggplot(data = isol.log.hit, aes_string(x = piVar, y = "maxDrift")) +
-    geom_point(size = 3, shape = 4, color = 'red') +
-    geom_smooth(method = "lm") +
-    labs(
-      title = "Power regression Model", 
+      title = "Power regression Model",
       x = piVar,
       y = "Log drift ratio"
     )
 
 ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
+    geom_smooth(method = 'lm') +
     geom_point() +
-    geom_line(aes(y=mavg)) +
-    geom_area(aes(x = Rjb, y = mavg), position='identity', alpha = 0.5) + 
     ylim(-1, 1) +
     labs(
-      title = "Residuals wrt Rjb", 
+      title = "Residuals wrt Rjb",
       x = 'Rjb',
       y = "Residuals on regression with Pi"
     )
 
-mod.double <- lm(paste("maxDrift ~ Pi6 +", piVar), data = isol.log.hit)
-res.df <- data.frame(mod.double$residuals, isol.log.hit$Rjb)
-colnames(res.df) <- c('residuals', 'Rjb')
-
-res.df$mavg <- ma(res.df$residuals)
-
-summary(mod.double)
-
-ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
+ggplot(data = res.df, aes(x=Magnitude, y=residuals)) +
+    geom_smooth(method = 'lm') +
     geom_point() +
-    geom_line(aes(y=mavg)) +
-    geom_area(aes(x = Rjb, y = mavg), position='identity', alpha = 0.5) + 
-    ylim(-1 , 1) +
+    ylim(-1, 1) +
     labs(
-      title = "Residuals wrt Rjb", 
-      x = 'Rjb',
+      title = "Residuals wrt Magnitude",
+      x = 'Magnitude',
       y = "Residuals on regression with Pi"
     )
+
+resi.rjb.fit <- lm(residuals ~ Rjb, data = res.df)
+summary(resi.rjb.fit)
+
+
+resi.mag.fit <- lm(residuals ~ Magnitude, data = res.df)
+summary(resi.mag.fit)
+
+# res.df$mavg <- ma(res.df$residuals)
+# 
+# ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
+#     geom_point() +
+#     geom_line(aes(y=mavg)) +
+#     geom_area(aes(x = Rjb, y = mavg), position='identity', alpha = 0.5) + 
+#     ylim(-1, 1) +
+#     labs(
+#       title = "Residuals wrt Rjb", 
+#       x = 'Rjb',
+#       y = "Residuals on regression with Pi"
+#     )
+# 
+# mod.double <- lm(paste("maxDrift ~ Pi6 +", piVar), data = isol.log.hit)
+# res.df <- data.frame(mod.double$residuals, isol.log.hit$Rjb)
+# colnames(res.df) <- c('residuals', 'Rjb')
+# 
+# res.df$mavg <- ma(res.df$residuals)
+# 
+# summary(mod.double)
+# 
+# ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
+#     geom_point() +
+#     geom_line(aes(y=mavg)) +
+#     geom_area(aes(x = Rjb, y = mavg), position='identity', alpha = 0.5) + 
+#     ylim(-1 , 1) +
+#     labs(
+#       title = "Residuals wrt Rjb", 
+#       x = 'Rjb',
+#       y = "Residuals on regression with Pi"
+#     )
 ```
 
 # Eads' sufficiency via hypothesis testing
@@ -1429,9 +1447,9 @@ mag.pval.list <- list()
 
 for (i in seq_along(piList)) {
   piVar <- piList[[i]]
-  power.mod <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
+  power.mod <- lm(paste("maxDrift ~ ", piVar), data = isol.log.miss)
 
-  suf.df <- data.frame(power.mod$fitted.values, isol.log.hit$Rjb, isol.log.hit$Magnitude)
+  suf.df <- data.frame(power.mod$fitted.values, isol.log.miss$Rjb, isol.log.miss$Magnitude)
   colnames(suf.df) <- c('expected.drift', 'Rjb', 'Magnitude')
 
   rjb.lm <- lm(expected.drift ~ Rjb, data = suf.df)
