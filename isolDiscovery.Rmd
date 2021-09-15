@@ -1413,15 +1413,47 @@ ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
 ```
 
 # Eads' sufficiency via hypothesis testing
+
+Currently, a difference is that we don't know which test Eads uses for her paper. For our purposes, we use the F-statistic.
 ```{r}
-piVar <- "Pi11"
-power.mod <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
+lmp <- function (modelobject) {
+    if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+    f <- summary(modelobject)$fstatistic
+    p <- pf(f[1],f[2],f[3],lower.tail=F)
+    attributes(p) <- NULL
+    return(p)
+}
 
-suf.df <- data.frame(power.mod$fitted.values, isol.log.hit$Rjb)
-colnames(suf.df) <- c('expected.drift', 'Rjb')
+rjb.pval.list <- list()
+mag.pval.list <- list()
 
-rjb.lm <- lm(expected.drift ~ Rjb, data = suf.df)
-summary(rjb.lm)
+for (i in seq_along(piList)) {
+  piVar <- piList[[i]]
+  power.mod <- lm(paste("maxDrift ~ ", piVar), data = isol.log.hit)
+
+  suf.df <- data.frame(power.mod$fitted.values, isol.log.hit$Rjb, isol.log.hit$Magnitude)
+  colnames(suf.df) <- c('expected.drift', 'Rjb', 'Magnitude')
+
+  rjb.lm <- lm(expected.drift ~ Rjb, data = suf.df)
+  mag.lm <- lm(expected.drift ~ Magnitude, data = suf.df)
+  
+  rjb.pval.list[[i]] <- lmp(rjb.lm)
+  mag.pval.list[[i]] <- lmp(mag.lm)
+}
+
+suf.results.df <- do.call(rbind, Map(data.frame, 
+                              PiVar=piList, RjbPval=rjb.pval.list, MagPval=mag.pval.list))
+suf.results.df$GM_IM <- varList
+
+ggplot(data=suf.results.df, aes(x = varList, y = RjbPval)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) + 
+  geom_hline(yintercept = 0.05)
+
+ggplot(data=suf.results.df, aes(x = varList, y = MagPval)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) + 
+  geom_hline(yintercept = 0.05)
 ```
 
 
