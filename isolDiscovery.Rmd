@@ -1397,6 +1397,8 @@ summary(resi.rjb.fit)
 resi.mag.fit <- lm(residuals ~ Magnitude, data = res.df)
 summary(resi.mag.fit)
 
+
+
 # res.df$mavg <- ma(res.df$residuals)
 # 
 # ggplot(data = res.df, aes(x=Rjb, y=residuals)) +
@@ -1428,6 +1430,48 @@ summary(resi.mag.fit)
 #       x = 'Rjb',
 #       y = "Residuals on regression with Pi"
 #     )
+```
+# Sufficiency via linear regression of residuals
+
+```{r}
+lmp <- function (modelobject) {
+    if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+    f <- summary(modelobject)$fstatistic
+    p <- pf(f[1],f[2],f[3],lower.tail=F)
+    attributes(p) <- NULL
+    return(p)
+}
+
+rjb.pval.list <- list()
+mag.pval.list <- list()
+
+for (i in seq_along(piList)) {
+  piVar <- piList[[i]]
+  
+  mod.im <- lm(paste("maxDrift ~ ", piVar), data = isol.log.miss)
+  res.df <- data.frame(mod.im$residuals, isol.log.miss$Rjb, isol.log.miss$Magnitude)
+  colnames(res.df) <- c('residuals', 'Rjb', 'Magnitude')
+  
+  rjb.lm <- lm(residuals ~ Rjb, data = res.df)
+  mag.lm <- lm(residuals ~ Magnitude, data = res.df)
+  
+  rjb.pval.list[[i]] <- lmp(rjb.lm)
+  mag.pval.list[[i]] <- lmp(mag.lm)
+}
+
+suf.results.df <- do.call(rbind, Map(data.frame, 
+                              PiVar=piList, RjbPval=rjb.pval.list, MagPval=mag.pval.list))
+suf.results.df$GM_IM <- varList
+
+ggplot(data=suf.results.df, aes(x = varList, y = RjbPval)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) + 
+  geom_hline(yintercept = 0.05)
+
+ggplot(data=suf.results.df, aes(x = varList, y = MagPval)) + 
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) + 
+  geom_hline(yintercept = 0.05)
 ```
 
 # Eads' sufficiency via hypothesis testing
