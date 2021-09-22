@@ -1353,7 +1353,7 @@ AIC(mod.miss_1, mod.miss_2, mod.miss_3)
 ma <- function(x, n = 5){stats::filter(x, rep(1 / n, n), sides = 2) %>% 
     as.vector()}
 
-piVar <- 'Pi8'
+piVar <- 'Pi1a'
 
 mod.single <- lm(paste("maxDrift ~ ", piVar), data = isol.log.miss)
 res.df <- data.frame(mod.single$residuals, isol.log.miss$Rjb, isol.log.miss$Magnitude)
